@@ -1,0 +1,57 @@
+# GraphQL schema example
+#
+# https://gqlgen.com/getting-started/
+
+type User {
+  id: ID!
+  name: String!
+  email: String!
+}
+
+type Board {
+  id: ID!
+  title: String!
+  tasks: [Task!]! 
+}
+
+type Task {
+  id: ID!
+  title: String!
+  description: String
+  status: String!
+  assignee: User
+  position: Int!
+}
+
+input NewTaskInput {
+  boardId: ID!
+  title: String!
+  description: String
+  assigneeId: ID
+}
+
+input SignupInput {
+  email: String!
+  password: String!
+  name: String!
+}
+
+type AuthpayLoad {
+  token: String!
+  user: User!
+}
+
+type Query {
+  getBoard(id: ID!) : Board
+}
+
+type Mutation {
+  createTask(input: NewTaskInput!): Task!
+  moveTask(taskId: ID!, newStatus: String!, newPosition: Int!): Task!
+  signup(input: SignupInput!): AuthpayLoad!
+  login(email:String!, password:String!): AuthpayLoad!
+}
+
+type Subscription {
+ boardUpdated(boardId: ID!): Task!
+}
