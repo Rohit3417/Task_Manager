@@ -10,10 +10,12 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
 	"workspace_project/graph"
 	"workspace_project/internal/auth"
 	"workspace_project/internal/cache"
 	"workspace_project/internal/db"
+	"workspace_project/internal/ws"
 
 	"github.com/99designs/gqlgen/graphql/handler"
 	"github.com/99designs/gqlgen/graphql/handler/extension"
@@ -168,12 +170,17 @@ func main() {
 	defer client.Close()
 
 	limiter := RateLimitMiddleware(client, limit, windowSeconds)
-
-	srv := handler.New(graph.NewExecutableSchema(graph.Config{Resolvers: &graph.Resolver{Pool: pool, Client: client}}))
+	hub := ws.NewHub()
+	go hub.Run()
+	go ws.StartRedisSubscriber(ctx, client, hub)
+	srv := handler.New(graph.NewExecutableSchema(graph.Config{Resolvers: &graph.Resolver{Pool: pool, Client: client, Hub: hub}}))
 
 	srv.AddTransport(transport.Options{})
 	srv.AddTransport(transport.GET{})
 	srv.AddTransport(transport.POST{})
+	srv.AddTransport(transport.Websocket{
+		KeepAlivePingInterval: 10 * time.Second,
+	})
 
 	srv.SetQueryCache(lru.New[*ast.QueryDocument](1000))
 	loggedHandler := middleware.Logger(srv)
