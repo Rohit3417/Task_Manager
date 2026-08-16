@@ -14,16 +14,30 @@ import (
 	"time"
 	"workspace_project/graph/model"
 	"workspace_project/internal/auth"
+	"workspace_project/internal/ws"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/redis/go-redis/v9"
 	"golang.org/x/crypto/bcrypt"
 )
 
+// Helper function for authorized acces in createtask, movetask and getBoard
+func requireAuth(ctx context.Context) (string, error) {
+	userID, ok := ctx.Value("userID").(string)
+	if !ok {
+		return "", fmt.Errorf("authentication required")
+	}
+
+	return userID, nil
+}
+
 // CreateTodo is the resolver for the createTodo field.
 func (r *mutationResolver) CreateTask(ctx context.Context, input model.NewTaskInput) (*model.Task, error) {
 	//panic(fmt.Errorf("not implemented: CreateTodo - createTodo"))
-
+	_, err1 := requireAuth(ctx)
+	if err1 != nil {
+		return nil, err1
+	}
 	key := "board:" + input.BoardID
 	_, err := r.Client.Del(ctx, key).Result()
 	if err != nil {
@@ -63,12 +77,29 @@ func (r *mutationResolver) CreateTask(ctx context.Context, input model.NewTaskIn
 	}
 	task.Position = posMax
 
+	// publishing the work for pub/sub
+	var event ws.BoardEvent
+	event.BoardID = input.BoardID
+	event.Type = "Created Task"
+	event.Task = &task
+	data_for_redis, err := json.Marshal(event)
+	if err != nil {
+		log.Printf("failed to marshal event for board %s: %v", input.BoardID, err)
+	} else {
+		if err := r.Client.Publish(ctx, "board:"+input.BoardID, data_for_redis).Err(); err != nil {
+			log.Printf("failed to marshal event for board %s: %v", input.BoardID, err)
+		}
+	}
 	return &task, nil
 }
 
 // MoveTask is the resolver for the moveTask field.
 func (r *mutationResolver) MoveTask(ctx context.Context, taskID string, newStatus string, newPosition int32) (*model.Task, error) {
 	//panic(fmt.Errorf("not implemented: MoveTask - moveTask"))
+	_, err1 := requireAuth(ctx)
+	if err1 != nil {
+		return nil, err1
+	}
 	var task model.Task
 	task.ID = taskID
 	var assigneeID *string
@@ -95,6 +126,20 @@ func (r *mutationResolver) MoveTask(ctx context.Context, taskID string, newStatu
 	}
 	if assigneeID != nil {
 		task.Assignee = &user
+	}
+
+	// For publishing
+	var event ws.BoardEvent
+	event.BoardID = board_id
+	event.Type = "Moved Task"
+	event.Task = &task
+	data_for_redis, err := json.Marshal(&event)
+	if err != nil {
+		log.Printf("failed to marshal event for board %s: %v", event.BoardID, err)
+	} else {
+		if err := r.Client.Publish(ctx, "board:"+event.BoardID, data_for_redis).Err(); err != nil {
+			log.Printf("failed to marshal event for board %s: %v", event.BoardID, err)
+		}
 	}
 	return &task, nil
 }
@@ -163,12 +208,16 @@ func (r *mutationResolver) Login(ctx context.Context, email string, password str
 // GetBoard is the resolver for the getBoard field.
 func (r *queryResolver) GetBoard(ctx context.Context, id string) (*model.Board, error) {
 	//panic(fmt.Errorf("not implemented: GetBoard - getBoard"))
+	_, err1 := requireAuth(ctx)
+	if err1 != nil {
+		return nil, err1
+	}
 	var board model.Board
 	// Deciding a consistent key : board:<id> here boards_id
 	//This will be our cache key (A simple concatinated string)
 	key := "board:" + id
 	val, err := r.Client.Get(ctx, key).Result()
-	if err == nil { // Not a redis error , maybe row empty
+	if err == nil {
 		err1 := json.Unmarshal([]byte(val), &board)
 		if err1 != nil {
 			return nil, fmt.Errorf("failed to unmarshal: %w", err1)
@@ -233,8 +282,53 @@ func (r *queryResolver) GetBoard(ctx context.Context, id string) (*model.Board, 
 }
 
 // BoardUpdated is the resolver for the boardUpdated field.
+/*
+suppose we have 2 users viewing the same board so we can say these are listeners ,
+now say a 3rd user logins for same board and updates it .
+So the 3rd user becomes a publisher and now we need to update the board for the other users
+For this purpose we use redis pub/sub feature (built-in redis)
+*/
+
+// Now YOUR code has to find which local WebSocket connections
+// are watching board 123, and push the update to each one
 func (r *subscriptionResolver) BoardUpdated(ctx context.Context, boardID string) (<-chan *model.Task, error) {
-	panic(fmt.Errorf("not implemented: BoardUpdated - boardUpdated"))
+	// panic(fmt.Errorf("not implemented: BoardUpdated - boardUpdated"))
+	_, err := requireAuth(ctx)
+	if err != nil {
+		return nil, err
+	}
+	c := &ws.Client{
+		BoardID: boardID,
+		Send:    make(chan ws.BoardEvent, 8),
+	}
+
+	r.Hub.Register(c)
+
+	ch := make(chan *model.Task)
+
+	go func() {
+		defer r.Hub.Unregister(c)
+		defer close(ch)
+
+		for {
+			select {
+			case event, ok := <-c.Send:
+				if !ok {
+					return
+				}
+				select {
+				case ch <- event.Task:
+				case <-ctx.Done():
+					return
+				}
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+
+	return ch, nil
+
 }
 
 // Mutation returns MutationResolver implementation.
